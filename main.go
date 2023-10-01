@@ -1,74 +1,110 @@
 package main
 
 import (
+	"crypto/rand"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
 )
 
-// Variables used for command line parameters
-var (
-	Token string
-)
+func generateRandomData(channel chan []byte) {
+	for p := range channel {
+		randomData := make([]byte, 1004) // Generate random data of 1 KB for testing
+		rand.Read(randomData)
+		channel <- p
+		channel <- randomData
+	}
+}
+
+func handleVoice(channel chan *discordgo.Packet) {
+	http.HandleFunc("/audio", func(w http.ResponseWriter, r *http.Request) {
+
+		w.Header().Set("Content-Type", "audio/ogg")
+		w.Header().Set("Transfer-Encoding", "chunked")
+
+		//save the audio and "append" to a buffer
+
+		for {
+			// randomData := make([]byte, 1024) // Generate random data of 1 KB for testing
+			// rand.Read(randomData)
+			// channel <- randomData
+			// time.Sleep(time.Second)
+
+			select {
+			case data, ok := <-channel:
+				if !ok {
+					fmt.Println("Closed")
+					return
+				}
+
+				w.Write(data.Opus)
+
+				// Flush the data to the client immediately
+				w.(http.Flusher).Flush()
+
+				fmt.Println("Received:", data)
+
+			}
+		}
+	})
+	port := ":8080"
+	fmt.Printf("Server listening on port %s\n", port)
+	http.ListenAndServe(port, nil)
+}
 
 func main() {
-
 	err := godotenv.Load(".env")
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
 
-	// Create a new Discord session using the provided bot token.
-	dg, err := discordgo.New("Bot " + os.Getenv("BOT_TOKEN"))
+	var (
+		Token     = os.Getenv("BOT_TOKEN")
+		ChannelID = os.Getenv("CHANNEL_ID")
+		ServerID  = os.Getenv("SERVER_ID")
+	)
+
+	discord, err := discordgo.New("Bot " + Token)
 	if err != nil {
-		fmt.Println("error creating Discord session,", err)
+		fmt.Println("error creating Discord session:", err)
 		return
 	}
 
-	// Register the messageCreate func as a callback for MessageCreate events.
-	dg.AddHandler(messageCreate)
+	discord.Identify.Intents = discordgo.MakeIntent(discordgo.IntentsGuildVoiceStates)
 
-	// In this example, we only care about receiving message events.
-	dg.Identify.Intents = discordgo.IntentsGuildMessages
-
-	// Open a websocket connection to Discord and begin listening.
-	err = dg.Open()
+	err = discord.Open()
 	if err != nil {
 		fmt.Println("error opening connection,", err)
 		return
 	}
 
-	// Wait here until CTRL-C or other term signal is received.
+	call, err := discord.ChannelVoiceJoin(ServerID, ChannelID, true, false)
+	if err != nil {
+		fmt.Println("failed to join voice channel:", err)
+		return
+	}
+
+	go func() {
+		time.Sleep(15 * time.Second)
+		close(call.OpusRecv)
+		call.Close()
+	}()
+
+	handleVoice(call.OpusRecv)
+
+	//Exit Bot
 	fmt.Println("Bot is now running.  Press CTRL-C to exit.")
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 	<-sc
 
 	// Cleanly close down the Discord session.
-	dg.Close()
-}
-
-// This function will be called (due to AddHandler above) every time a new
-// message is created on any channel that the authenticated bot has access to.
-func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-
-	// Ignore all messages created by the bot itself
-	// This isn't required in this specific example but it's a good practice.
-	if m.Author.ID == s.State.User.ID {
-		return
-	}
-	// If the message is "ping" reply with "Pong!"
-	if m.Content == "ping" {
-		s.ChannelMessageSend(m.ChannelID, "Pong!")
-	}
-
-	// If the message is "pong" reply with "Ping!"
-	if m.Content == "pong" {
-		s.ChannelMessageSend(m.ChannelID, "Ping!")
-	}
+	discord.Close()
 }
